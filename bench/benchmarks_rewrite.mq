@@ -1,0 +1,39 @@
+# Run with: mq-bench bench/benchmarks_rewrite.mq --iterations 3 --warmup 1
+# Run from the repository root so that `import "pattern"` is found.
+# Setup runs on every iteration, so each timing includes building the document.
+
+import "pattern" as pattern
+| def _section(i):
+    let n = to_string(i)
+    | "## Section " + n + "\n\n"
+    + "See [docs " + n + "](http://docs.example/" + n + ") and [site " + n + "](https://site.example/" + n + " \"Site\").\n\n"
+    + "- [ ] task " + n + " [ref](http://ref.example/" + n + ")\n\n"
+    + "> quote [q](http://q.example/" + n + ")\n\n";
+| let _src = "# Guide\n\n" + join(map(range(1, 64), fn(i): _section(i);), "")
+| let _ns = to_markdown(_src)
+| let _ms = pattern::find_all(_ns, "[$t](http://$r)")
+|
+
+def bench_find_then_rewrite_source():
+  pattern::rewrite_source(_src, _ms, "[$t](https://$r)")
+end
+
+def bench_replace_all():
+  pattern::replace_all(_ns, "[$t](http://$r)", "[$t](https://$r)")
+end
+
+def bench_replace_rule():
+  pattern::replace_rule(_ns, {"pattern": "[$t](http://$r)", "inside": "## Section 16"}, "[$t](https://$r)")
+end
+
+def bench_join_nodes():
+  pattern::join_nodes(_ns)
+end
+
+def bench_report():
+  map(_ms, fn(m): pattern::report(m, "a.md");)
+end
+
+def bench_describe():
+  map(_ms, fn(m): pattern::describe(m, "a.md");)
+end

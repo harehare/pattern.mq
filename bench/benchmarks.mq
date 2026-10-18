@@ -1,0 +1,69 @@
+# Run with: mq-bench bench/benchmarks.mq --iterations 3 --warmup 1
+# Run from the repository root so that `import "pattern"` is found.
+# Setup runs on every iteration, so each timing includes building the document.
+# `bench_document_only` measures that setup alone; subtract it to get the search cost.
+
+import "pattern" as pattern
+| def _section(i):
+    let n = to_string(i)
+    | "## Section " + n + "\n\n"
+    + "See [docs " + n + "](http://docs.example/" + n + ") and [site " + n + "](https://site.example/" + n + " \"Site\").\n\n"
+    + "- [ ] task " + n + " [ref](http://ref.example/" + n + ")\n"
+    + "- [x] done " + n + "\n\n"
+    + "> quote [q](http://q.example/" + n + ")\n\n"
+    + "```rust\nfn f" + n + "() { x.unwrap() }\n```\n\n"
+    + "| a | b |\n|---|---|\n| [c](http://c.example/" + n + ") | " + n + " |\n\n";
+| let _src = "# Guide\n\n" + join(map(range(1, 64), fn(i): _section(i);), "")
+| let _ns = to_markdown(_src)
+| let _link = first(to_markdown("[docs](http://docs.example/1)"))
+|
+
+def bench_document_only():
+  len(_ns)
+end
+
+def bench_captures_link():
+  foreach (i, range(0, 99)):
+    pattern::captures(_link, "[$text](http://$rest)")
+  end
+end
+
+def bench_find_all_link():
+  pattern::find_all(_ns, "[$t]($u)")
+end
+
+def bench_find_all_literal_url():
+  pattern::find_all(_ns, "[$t](http://docs.example/7)")
+end
+
+def bench_find_all_no_match():
+  pattern::find_all(_ns, "![$alt]($src)")
+end
+
+def bench_find_all_heading():
+  pattern::find_all(_ns, "## $title")
+end
+
+def bench_find_all_list_item():
+  pattern::find_all(_ns, "- [ ] $item")
+end
+
+def bench_find_all_code_block():
+  pattern::find_all(_ns, "```$lang\n$code\n```")
+end
+
+def bench_find_all_two_blocks():
+  pattern::find_all(_ns, "## $head\n\nSee $rest")
+end
+
+def bench_find_all_gap():
+  pattern::find_all(_ns, "## $head\n\n$$$\n\n> $quote")
+end
+
+def bench_find_rule_inside():
+  pattern::find_rule(_ns, {"pattern": "[$t]($u)", "inside": "## Section 16"})
+end
+
+def bench_find_rule_constraints():
+  pattern::find_rule(_ns, {"pattern": "[$t]($u)", "constraints": {"u": "^https"}})
+end

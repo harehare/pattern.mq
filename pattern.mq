@@ -1,0 +1,809 @@
+# Finds, extracts and rewrites markdown nodes that match a pattern written as markdown.
+# Metavariables like `$text` capture the text at that position.
+# This module is under development. APIs and behavior may change without notice.
+#
+# Matching is done on the markdown source of each node, so it works best for inline
+# nodes (links, images) and single-line blocks (headings, list items).
+# Searches descend into the children of nodes that do not match, so a link inside a
+# heading, a list item or a blockquote is found too.
+
+def _rest(a): slice(a, 1, len(a));
+
+# -- Compiling a pattern block --
+
+# Assigns a regex group name to each metavariable occurrence. The second and later
+# occurrences of a name get a `__N` suffix so the regex stays valid.
+def _group_name(name, n): if (n == 1): name else: name + "__" + to_string(n);
+
+def _count(v): if (is_none(v)): 1 else: v + 1;
+
+def _assign(acc, m): _assign_n(acc, m, slice(m["match"], 1, len(m["match"])));
+
+def _assign_n(acc, m, name): _assign_g(acc, m, name, _count(acc["seen"][name]));
+
+def _assign_g(acc, m, name, n):
+  {"seen": set(acc["seen"], name, n), "at": set(acc["at"], to_string(m["start"]), _group_name(name, n))};
+
+# Maps the start offset of each metavariable occurrence to its group name.
+def _plan(pat):
+  fold(_regex_replace_matches(pat, "\\$[A-Za-z_][A-Za-z0-9_]*")["matches"], {"seen": {}, "at": {}}, fn(acc, m): _assign(acc, m);)["at"];
+
+def _atom(t, group): if (is_none(group)): "\\" + t else: "(?P<" + group + ">.+?)";
+
+def _compile_at(pat, at):
+  "(?s)^" + regex_replace(pat, "\\$[A-Za-z_][A-Za-z0-9_]*|[\\\\.^$|?*+()\\[\\]{}]", fn(m): _atom(m["match"], at[to_string(m["start"])]);) + "$";
+
+# Converts a pattern into an anchored regex. `$name` becomes a named group and every
+# other regex metacharacter is escaped.
+def _compile(pat): _compile_at(pat, _plan(pat));
+
+# Returns the markdown source of a node.
+def _source(node): to_string(node);
+
+# -- Matching a block --
+
+# Merges `b` into `a`. Returns `None` when a key present in both has different values.
+# `_title` is bookkeeping and never conflicts.
+def _merge_eq(a, b): if (is_none(a) || is_none(b)): None else: _merge_keys(keys(b), a, b);
+
+def _merge_keys(ks, a, b):
+  if (is_empty(ks)):
+    a
+  else:
+    _merge_key(ks, a, b, first(ks));
+
+def _merge_key(ks, a, b, k):
+  if (k != "_title" && !is_none(a[k]) && a[k] != b[k]): None else: _merge_keys(_rest(ks), set(a, k, b[k]), b);
+
+# Drops numbered groups and folds `name__N` duplicates into `name`.
+# Returns `None` when the duplicates captured different text.
+def _unify(caps): _unify_keys(keys(caps), caps, {});
+
+def _unify_keys(ks, caps, out):
+  if (is_empty(ks)):
+    out
+  else:
+    _unify_key(ks, caps, out, first(ks));
+
+def _unify_key(ks, caps, out, k):
+  if (test(k, "^[0-9]+$")):
+    _unify_keys(_rest(ks), caps, out)
+  elif (test(k, "__[0-9]+$")):
+    _unify_dup(ks, caps, out, k, regex_replace(k, "__[0-9]+$", fn(m): "";))
+  else:
+    _unify_keys(_rest(ks), caps, set(out, k, caps[k]));
+
+def _unify_dup(ks, caps, out, k, base):
+  if (caps[base] != caps[k]): None else: _unify_keys(_rest(ks), caps, out);
+
+def _part_result(r): if (is_empty(r["matches"])): None else: _unify(first(r["matches"])["captures"]);
+
+# Matches one piece of a pattern against the text at the same position.
+def _match_part(pat, src): _part_result(_regex_replace_matches(src, _compile(pat)));
+
+# Splits `[text](url "title")` and `![alt](src)` into `["!" or "", text, url, title]`.
+# Returns `None` when the source is not a link or an image. Only used to keep the title of
+# a rewritten link.
+def _link_parts(s): _link_parts_of(_regex_replace_matches(s, "(?s)^(!?)\\[(.*)\\]\\((.*?)(?: +\"(.*)\")?\\)$")["matches"]);
+
+def _link_parts_of(ms): if (is_empty(ms)): None else: first(ms)["captures"];
+
+def _title_caps(t): if (is_none(t)): {} else: {"_title": t};
+
+# -- Compiling a pattern into nodes --
+
+# `$name` and `$$$name` are swapped for plain words before the pattern is parsed as
+# markdown, because a `$` would start math. `_restore` turns the words back in the text of
+# the parsed nodes. An underscore is written `UNDRSC` because markdown escapes it in text.
+def _enc(name): regex_replace(name, "_", fn(m): "UNDRSC";);
+
+def _dec(name): regex_replace(name, "UNDRSC", fn(m): "_";);
+
+def _mark(m):
+  if (starts_with(m, "$$$")):
+    "MQGAP" + _enc(slice(m, 3, len(m))) + "MQEND"
+  else:
+    "MQMV" + _enc(slice(m, 1, len(m))) + "MQEND";
+
+def _prep(pat): regex_replace(pat, "\\$\\$\\$[A-Za-z0-9_]*|\\$[A-Za-z_][A-Za-z0-9_]*", fn(m): _mark(m["match"]););
+
+def _unmark(m): "$" + _dec(slice(m, 4, len(m) - 5));
+
+def _restore(s): regex_replace(s, "MQMV[A-Za-z0-9]+?MQEND", fn(m): _unmark(m["match"]););
+
+# The source of a pattern node with its metavariables written as `$name` again.
+def _psrc(n): _restore(to_string(n));
+
+# A node that is only `MQGAP..MQEND` is a `$$$` gap; every other node is matched.
+def _item(n):
+  if (to_md_name(n) == "text" && test(to_string(n), "^MQGAP[A-Za-z0-9]*MQEND$")):
+    {"gap": "$$$" + _dec(slice(to_string(n), 5, len(to_string(n)) - 5))}
+  else:
+    {"node": n};
+
+# Compiles a pattern into the list of items it is matched as: `{"node": node}` for a node
+# to match and `{"gap": "$$$name"}` for a gap. The pattern is parsed once as markdown, so
+# blocks need not be split and a code block may contain a blank line.
+def _items(pat): map(to_markdown(_prep(trim(pat))), fn(n): _item(n););
+
+# -- Matching a node --
+
+def _has_mv(s): is_string(s) && test(s, "\\$[A-Za-z_]");
+
+# Matches the text of a pattern against the text of a node. Text without metavariables
+# must be equal.
+def _text_match(p, d):
+  if (!is_string(d)):
+    None
+  elif (_has_mv(p)):
+    _match_part(p, d)
+  elif (p == d):
+    {}
+  else:
+    None;
+
+def _both_none(p, d): if (is_none(p) && is_none(d)): {} else: None;
+
+def _attr_match(p, d):
+  if (is_none(p) || is_none(d)):
+    _both_none(p, d)
+  elif (is_string(p)):
+    _text_match(p, to_string(d))
+  elif (p == d):
+    {}
+  else:
+    None;
+
+def _pval(n, a): let v = attr(n, a) | if (is_string(v)): _restore(v) else: v;
+
+# Attributes that decide whether two container nodes are the same kind of thing. `title`
+# is handled apart, `level` and `index` of a list item are ignored.
+def _attr_names(): ["depth", "ordered", "checked", "alt", "url", "ident", "label"];
+
+def _attrs_match(pn, dn, ks, acc):
+  if (is_none(acc) || is_empty(ks)):
+    acc
+  else:
+    _attrs_match(pn, dn, _rest(ks), _merge_eq(acc, _attr_match(_pval(pn, first(ks)), attr(dn, first(ks)))));
+
+# A pattern without a title ignores the title of the link, but remembers it for `replace`.
+def _title_cmp(p, d):
+  if (is_none(p)):
+    _title_caps(d)
+  elif (is_none(d)):
+    None
+  else:
+    _text_match(p, d);
+
+def _title_match(pn, dn): _title_cmp(_pval(pn, "title"), attr(dn, "title"));
+
+def _join(ns): if (is_empty(ns)): "" else: join_nodes(ns);
+
+def _pairs(pk, dk, i, acc):
+  if (i >= len(pk) || is_none(acc)):
+    acc
+  else:
+    _pairs(pk, dk, i + 1, _merge_eq(acc, _node_match(pk[i], dk[i])));
+
+# Children are matched one to one. A pattern whose only child is text is matched against
+# the source of all the children, so `[$t]($u)` captures `a *b*` from `[a *b*](u)`.
+def _kids_match(pk, dk):
+  if (len(pk) == 1 && to_md_name(first(pk)) == "text"):
+    _text_match(_psrc(first(pk)), _join(dk))
+  elif (len(pk) != len(dk)):
+    None
+  else:
+    _pairs(pk, dk, 0, {});
+
+# Links, images and every node with children are compared by kind, attributes and children.
+# Other nodes are compared by their source.
+def _structural(n): !is_empty(_kids(n)) || to_md_name(n) == "link" || to_md_name(n) == "image";
+
+# Captures are merged children first, then attributes and title, which is the order the
+# metavariables have in a link or image pattern.
+def _struct_order(ck, ca, ct): _merge_eq(_merge_eq(ck, ca), ct);
+
+def _struct_kids(pn, dn, ca, ct):
+  if (is_none(ct)): None else: _struct_order(_kids_match(_kids(pn), _kids(dn)), ca, ct);
+
+def _struct_title(pn, dn, ca):
+  if (is_none(ca)): None else: _struct_kids(pn, dn, ca, _title_match(pn, dn));
+
+def _struct_match(pn, dn): _struct_title(pn, dn, _attrs_match(pn, dn, _attr_names(), {}));
+
+# The name of a pattern node that is only a metavariable, or `None`.
+def _slot_name(pn):
+  if (to_md_name(pn) != "text"):
+    None
+  elif (test(_psrc(pn), "^\\$[A-Za-z_][A-Za-z0-9_]*$")):
+    slice(_psrc(pn), 1, len(_psrc(pn)))
+  else:
+    None;
+
+def _node_kind_match(pn, dn):
+  if (to_md_name(pn) != to_md_name(dn)):
+    None
+  elif (_structural(pn)):
+    _struct_match(pn, dn)
+  else:
+    _text_match(_psrc(pn), _source(dn));
+
+# Matches a document node against a pattern node. A node that is only `$name` matches any
+# node and captures its source.
+def _node_match(pn, dn):
+  let slot = _slot_name(pn)
+  | if (is_none(slot)): _node_kind_match(pn, dn) else: set({}, slot, _source(dn));
+
+def _match_item(node, item):
+  if (is_none(item) || !is_none(item["gap"])):
+    None
+  else:
+    _node_match(item["node"], node);
+
+# Matches one node against the first node of a pattern.
+def _match_block(node, pat): _match_item(node, first(_items(pat)));
+
+def _drop_title(c): if (is_none(c)): None else: fold(keys(c), {}, fn(acc, k): if (k == "_title"): acc else: set(acc, k, c[k]););
+
+# Returns the named captures of `node` for `pat`, or `None` when it does not match.
+# A metavariable used twice must capture the same text both times. A link or image
+# pattern compares text, url and title separately, so `[$text]($url)` captures only the
+# url even when the link has a title, and `[$text]($url "$title")` captures the title.
+#
+# Example:
+# ```
+# import "pattern" | to_markdown("[docs](http://x)") | first(self) | pattern::captures("[$text]($url)")
+# #=> {"text": "docs", "url": "http://x"}
+# ```
+#
+# Returns: dict | None
+def captures(node, pat): _drop_title(_match_block(node, pat));
+
+# Returns true when `node` matches `pat`.
+#
+# Returns: bool
+def matches(node, pat): !is_none(captures(node, pat));
+
+# -- Templates --
+
+def _cap_first(v): if (is_empty(v)): v else: upcase(slice(v, 0, 1)) + slice(v, 1, len(v));
+
+def _slug(v): regex_replace(regex_replace(downcase(v), "[^a-z0-9]+", fn(m): "-";), "^-|-$", fn(m): "";);
+
+def _apply_filter(f, v):
+  if (f == "upcase"):
+    upcase(v)
+  elif (f == "downcase"):
+    downcase(v)
+  elif (f == "trim"):
+    trim(v)
+  elif (f == "capitalize"):
+    _cap_first(v)
+  elif (f == "slug"):
+    _slug(v)
+  else:
+    error("pattern: unknown filter `" + f + "`");
+
+def _apply_filters(fs, v):
+  if (is_empty(fs)):
+    v
+  else:
+    _apply_filters(_rest(fs), _apply_filter(first(fs), v));
+
+# Renders a captured value. A `$$$name` capture holds nodes, which are joined as in the source.
+def _text(v): if (is_array(v)): _join_nodes(v) else: v;
+
+def _lookup(t, fs, v): if (is_none(v)): t else: _apply_filters(fs, _text(v));
+
+def _subst(t, caps):
+  if (starts_with(t, "$$$")):
+    _lookup(t, [], caps[slice(t, 3, len(t))])
+  elif (starts_with(t, "${")):
+    _subst_braced(t, caps, split(slice(t, 2, len(t) - 1), "\\|"))
+  else:
+    _lookup(t, [], caps[slice(t, 1, len(t))]);
+
+def _subst_braced(t, caps, parts): _lookup(t, _rest(parts), caps[first(parts)]);
+
+# Substitutes `$name`, `$$$name` and `${name|filter|...}` in `tmpl` with the captured values.
+# Filters are `upcase`, `downcase`, `trim`, `capitalize` and `slug`.
+def _fill(tmpl, caps):
+  regex_replace(tmpl, "\\$\\$\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[A-Za-z_][A-Za-z0-9_]*(?:\\|[a-z]+)*\\}|\\$[A-Za-z_][A-Za-z0-9_]*", fn(m): _subst(m["match"], caps););
+
+def _untitled_link(p): !is_none(p) && is_none(p["4"]);
+
+# Keeps the title of the original link when the rewritten link has none.
+def _retitle(s, title):
+  if (is_none(title) || title == ""):
+    s
+  elif (_untitled_link(_link_parts(s))):
+    regex_replace(s, "\\)$", fn(m): " \"" + title + "\")";)
+  else:
+    s;
+
+def _render(tmpl, caps, title): _retitle(_fill(tmpl, caps), title);
+
+# Rewrites `node` with `tmpl` when it matches `pat`. Non-matching input is returned as is,
+# so it can be used with `-U` to edit a document in place. The title of a link is kept
+# unless the pattern or the template mentions one.
+#
+# Example:
+# ```
+# mq -U 'import "pattern" | .link | pattern::replace("[$text](http://$rest)", "[$text](https://$rest)")' a.md
+# ```
+#
+# Returns: markdown
+def replace(node, pat, tmpl): _replace_with(node, _match_block(node, pat), tmpl);
+
+def _replace_with(node, c, tmpl):
+  if (is_none(c)):
+    node
+  else:
+    first(to_markdown(_render(tmpl, c, c["_title"])));
+
+# -- Multi-node patterns --
+
+# A `$$$` or `$$$name` item skips nodes.
+def _is_gap(item): !is_none(item["gap"]);
+
+# Binds the skipped nodes to the name of a `$$$name` block. `$$$` alone binds nothing.
+def _bind(b, ns, from, j, r):
+  if (is_none(r) || len(b) == 3):
+    r
+  else:
+    {"end": r["end"], "captures": set(r["captures"], slice(b, 3, len(b)), slice(ns, from, j))};
+
+# Matches `blocks` against consecutive nodes starting at index `i`.
+# Returns `{"end": index, "captures": dict}` or `None`.
+def _seq(blocks, ns, i, caps):
+  if (is_empty(blocks)):
+    {"end": i, "captures": caps}
+  elif (_is_gap(first(blocks))):
+    _gap(first(blocks)["gap"], _rest(blocks), ns, i, i, caps)
+  elif (i >= len(ns)):
+    None
+  else:
+    _step(blocks, ns, i, caps, _match_item(ns[i], first(blocks)));
+
+def _step(blocks, ns, i, caps, c):
+  if (is_none(c)): None else: _seq_next(blocks, ns, i, _merge_eq(caps, c));
+
+def _seq_next(blocks, ns, i, caps):
+  if (is_none(caps)): None else: _seq(_rest(blocks), ns, i + 1, caps);
+
+# Index of the next heading at or after `j`, or the end of `ns`.
+def _section_end(ns, j): if (j >= len(ns) || is_h(ns[j])): j else: _section_end(ns, j + 1);
+
+# `$$$` skips zero or more nodes but never crosses a heading, so a gap stays in one section.
+# A trailing `$$$` takes the rest of the section.
+def _gap(b, rest, ns, from, j, caps):
+  if (is_empty(rest)):
+    _bind(b, ns, from, _section_end(ns, j), {"end": _section_end(ns, j), "captures": caps})
+  else:
+    _gap_next(b, rest, ns, from, j, caps, _bind(b, ns, from, j, _seq(rest, ns, j, caps)));
+
+def _gap_next(b, rest, ns, from, j, caps, r):
+  if (!is_none(r)):
+    r
+  elif (j >= len(ns) || is_h(ns[j])):
+    None
+  else:
+    _gap(b, rest, ns, from, j + 1, caps);
+
+# Child nodes of `n`, or an empty array for a leaf.
+def _kids(n): let c = attr(n, "children") | if (is_array(c)): c else: [];
+
+# `top` is the index of the top-level node that holds the sequence being scanned, or
+# `None` when the sequence is the document itself.
+def _top_of(top, i): if (is_none(top)): i else: top;
+
+def _match_of(ns, i, r, top):
+  {"start": i, "end": r["end"], "nodes": slice(ns, i, r["end"]), "captures": _drop_title(r["captures"]), "title": r["captures"]["_title"], "top": _top_of(top, i), "nested": !is_none(top)};
+
+# Scans `ns` for non-overlapping matches of the blocks. A node that does not start a
+# match is searched through its children. This is a fold, not a recursion, so a document
+# can have more nodes than mq allows nested calls.
+def _scan(blocks, ns, top, acc):
+  if (is_empty(ns)):
+    acc
+  else:
+    fold(range(0, len(ns) - 1), {"next": 0, "ms": acc}, fn(st, i): _scan_at(blocks, ns, top, st, i);)["ms"];
+
+def _scan_at(blocks, ns, top, st, i):
+  if (i < st["next"]):
+    st
+  else:
+    _scan_step(blocks, ns, top, st, i, _seq(blocks, ns, i, {}));
+
+def _scan_step(blocks, ns, top, st, i, r):
+  if (is_none(r) || r["end"] == i):
+    {"next": st["next"], "ms": _scan(blocks, _kids(ns[i]), _top_of(top, i), st["ms"])}
+  else:
+    {"next": r["end"], "ms": st["ms"] + [_match_of(ns, i, r, top)]};
+
+# Finds every place where consecutive nodes match a multi-node pattern.
+# Blocks are separated by a blank line; each block matches one node. A block that is
+# just `$$$` skips any number of nodes within the same section, and `$$$name` also
+# captures the skipped nodes. A trailing `$$$` takes the rest of the section.
+#
+# Example:
+# ```
+# mq -A 'import "pattern" | pattern::find_all(self, "# $head\n\n[$text](http://$rest)")' a.md
+# ```
+#
+# Matches are also searched for inside the children of other nodes, in document order.
+# `start` and `end` are indices into the sequence that holds the match: the document for a
+# top-level match, the children of a node for a nested one (`nested` is true). `top` is the
+# index of the top-level node that holds the match.
+#
+# Returns: array of {start, end, nodes, captures, title, top, nested}
+def find_all(ns, pat): _scan(_items(pat), ns, None, []);
+
+# -- Rules --
+
+# Indices of the headings of `ns`. Only built when the rule looks at headings.
+def _head_index(ns, rule):
+  if ((is_none(rule["inside"]) && is_none(rule["not_inside"])) || is_empty(ns)):
+    []
+  else:
+    filter(range(0, len(ns) - 1), fn(i): is_h(ns[i]););
+
+def _pat_item(p): if (is_none(p)): None else: first(_items(p));
+
+# What a rule needs while it is checked: the document, its heading indices and the heading
+# patterns compiled once.
+def _context(ns, rule): {"ns": ns, "hi": _head_index(ns, rule), "inside": _pat_item(rule["inside"]), "not_inside": _pat_item(rule["not_inside"])};
+
+# Matches come in document order, so the headings that hold the current node are kept as a
+# stack (nearest first) and moved forward to the next match instead of searched again.
+def _push_head(stack, h): [h] + filter(stack, fn(x): attr(x, "depth") < attr(h, "depth"););
+
+def _adv(ns, hi, k, t, stack):
+  if (k >= len(hi) || hi[k] >= t):
+    {"k": k, "stack": stack}
+  else:
+    _adv(ns, hi, k + 1, t, _push_head(stack, ns[hi[k]]));
+
+# Headings that contain the node at `t`. A heading is not contained by the headings of its
+# own level or deeper.
+def _heads_of(ns, t, stack):
+  if (is_h(ns[t])): filter(stack, fn(x): attr(x, "depth") < attr(ns[t], "depth");) else: stack;
+
+def _first_cap(hs, item):
+  if (is_empty(hs)):
+    None
+  else:
+    _first_cap_of(hs, item, _drop_title(_match_item(first(hs), item)));
+
+def _first_cap_of(hs, item, c): if (is_none(c)): _first_cap(_rest(hs), item) else: c;
+
+def _kind_ok(kind, n): is_none(kind) || to_md_name(n) == kind;
+
+def _lang_ok(lang, n): is_none(lang) || attr(n, "lang") == lang;
+
+def _cons_one(re, v): is_string(v) && test(v, re);
+
+def _cons_all(ks, c, caps, want):
+  if (is_empty(ks)):
+    true
+  elif (_cons_one(c[first(ks)], caps[first(ks)]) != want):
+    false
+  else:
+    _cons_all(_rest(ks), c, caps, want);
+
+def _cons_ok(c, caps, want): is_none(c) || _cons_all(keys(c), c, caps, want);
+
+def _outside_ok(c, hs): is_none(c["not_inside"]) || is_none(_first_cap(hs, c["not_inside"]));
+
+def _inside_ok(c, m, hs): if (is_none(c["inside"])): m else: _with_caps(m, _first_cap(hs, c["inside"]));
+
+def _with_caps(m, c): if (is_none(c)): None else: _with_merged(m, _merge_eq(m["captures"], c));
+
+def _with_merged(m, caps): if (is_none(caps)): None else: set(m, "captures", caps);
+
+def _check(c, rule, m, hs):
+  if (!_kind_ok(rule["kind"], first(m["nodes"]))):
+    None
+  elif (!_lang_ok(rule["lang"], first(m["nodes"]))):
+    None
+  elif (!_cons_ok(rule["constraints"], m["captures"], true)):
+    None
+  elif (!_cons_ok(rule["not_constraints"], m["captures"], false)):
+    None
+  elif (!_outside_ok(c, hs)):
+    None
+  else:
+    _inside_ok(c, m, hs);
+
+def _push(acc, m): if (is_none(m)): acc else: acc + [m];
+
+def _keep(c, rule, ms): fold(ms, {"k": 0, "stack": [], "out": []}, fn(st, m): _keep_step(c, rule, st, m);)["out"];
+
+def _keep_step(c, rule, st, m): _keep_with(c, rule, st, m, _adv(c["ns"], c["hi"], st["k"], m["top"], st["stack"]));
+
+def _keep_with(c, rule, st, m, a):
+  {"k": a["k"], "stack": a["stack"], "out": _push(st["out"], _check(c, rule, m, _heads_of(c["ns"], m["top"], a["stack"])))};
+
+# Finds the matches of a rule. `rule` is a dict with these keys:
+#
+# - `pattern`: the pattern, as for `find_all` (required)
+# - `kind`: the type of the first matched node, such as `link`, `code` or `h2`
+# - `lang`: the language of the first matched node when it is a code block
+# - `inside`: a heading pattern; the match must be under a heading that matches it,
+#   and its metavariables are added to the captures
+# - `not_inside`: the match must not be under a heading that matches this pattern
+# - `constraints`: dict of metavariable name to regex that its capture must match
+# - `not_constraints`: dict of metavariable name to regex that its capture must not match
+#
+# Example:
+# ```
+# import "pattern" | pattern::find_rule(self, {"pattern": "[$t]($u)", "inside": "## Install", "constraints": {"u": "^http://"}})
+# ```
+#
+# Returns: array of {start, end, nodes, captures, title, top, nested}
+def find_rule(ns, rule): _keep(_context(ns, rule), rule, find_all(ns, rule["pattern"]));
+
+# -- Replacing --
+
+def _top_level(ms): fold(ms, [], fn(acc, m): if (m["nested"]): acc else: acc + [m];);
+
+def _match_title(m): if (len(m["nodes"]) == 1): m["title"] else: None;
+
+def _prev_end(ms, i): if (i == 0): 0 else: ms[i - 1]["end"];
+
+def _splice_piece(ns, ms, i, tmpl):
+  slice(ns, _prev_end(ms, i), ms[i]["start"]) + to_markdown(_render(tmpl, ms[i]["captures"], _match_title(ms[i])));
+
+# Replaces each matched range in `ns` with the nodes of `tmpl`.
+def _splice(ns, ms, tmpl):
+  if (is_empty(ms)):
+    ns
+  else:
+    fold(map(range(0, len(ms) - 1), fn(i): _splice_piece(ns, ms, i, tmpl);), [], fn(a, b): a + b;) + slice(ns, last(ms)["end"], len(ns));
+
+# Replaces every range of `ns` that matches the rule with `tmpl`. Nodes outside the
+# matches are returned as is, so it can be used with `-A -U` to rewrite a whole document.
+# Use `$$$name` in both the pattern and the template to keep the nodes in between;
+# nodes skipped by an unnamed `$$$` are dropped. Only top-level matches are replaced;
+# use `rewrite_source` to rewrite matches inside other nodes.
+#
+# Returns: array of markdown
+def replace_rule(ns, rule, tmpl): _splice(ns, _top_level(find_rule(ns, rule)), tmpl);
+
+# Replaces every range of `ns` that matches the multi-node pattern `pat` with `tmpl`.
+# Only top-level matches are replaced.
+#
+# Example:
+# ```
+# mq -A -U 'import "pattern" | pattern::replace_all(self, "# $head\n\n[$text](http://$rest)", "# $head\n\n[$text](https://$rest)")' a.md
+# ```
+#
+# Returns: array of markdown
+def replace_all(ns, pat, tmpl): _splice(ns, _top_level(find_all(ns, pat)), tmpl);
+
+# -- Joining nodes --
+
+def _rep(s, n): if (n <= 0): "" else: s + _rep(s, n - 1);
+
+# Text between two nodes, from their positions. Nodes are flat, so a paragraph is a run of
+# inline nodes on adjacent columns and blocks are separated by line breaks.
+def _sep_of(la, lb):
+  if (is_none(la) || is_none(lb)):
+    "\n\n"
+  elif (lb["start_line"] > la["end_line"]):
+    _rep("\n", lb["start_line"] - la["end_line"])
+  else:
+    _rep(" ", lb["start_column"] - la["end_column"]);
+
+def _piece(ns, i):
+  if (i == 0):
+    to_string(ns[0])
+  else:
+    _sep_of(get_location(ns[i - 1]), get_location(ns[i])) + to_string(ns[i]);
+
+# Joins nodes into the markdown they came from.
+#
+# Returns: string
+def join_nodes(ns): if (is_empty(ns)): "" else: join(map(range(0, len(ns) - 1), fn(i): _piece(ns, i);), "");
+
+def _join_nodes(ns): join_nodes(ns);
+
+# -- Reporting --
+
+# Position of a node. A table cell is reported with the pipes around it, so its position is
+# taken from its content instead.
+def _loc(n): _loc_of(n, get_location(n), _kids(n));
+
+def _loc_of(n, loc, ks):
+  if (to_md_name(n) != "table_cell" || is_empty(ks)):
+    loc
+  else:
+    _loc_span(get_location(first(ks)), get_location(last(ks)));
+
+def _loc_span(a, b):
+  {"start_line": a["start_line"], "start_column": a["start_column"], "end_line": b["end_line"], "end_column": b["end_column"]};
+
+def _start(m, k): _loc(first(m["nodes"]))[k];
+
+def _end(m, k): _loc(last(m["nodes"]))[k];
+
+def _source_of(m): join_nodes(m["nodes"]);
+
+def _show(v): if (is_array(v)): _text(v) else: v;
+
+def _name(file): if (is_none(file) || file == ""): "<stdin>" else: file;
+
+def _caps_lines(caps): map(keys(caps), fn(k): "  $" + k + " = " + _show(caps[k]););
+
+def _prefixed(p, s): join(map(split(s, "\n"), fn(l): p + l;), "\n");
+
+def _where(m, file): _name(file) + ":" + to_string(_start(m, "start_line")) + ":" + to_string(_start(m, "start_column"));
+
+# Returns a printable report of a match: its location, source and captures.
+#
+# Returns: string
+def report(m, file): join([_where(m, file), _prefixed("> ", _source_of(m))] + _caps_lines(m["captures"]), "\n");
+
+# Returns a printable preview of a rewrite: its location and the old and new text.
+#
+# Returns: string
+def preview(m, file, text): join([_where(m, file), _prefixed("- ", _source_of(m)), _prefixed("+ ", text)], "\n");
+
+def _shown_caps(caps): fold(keys(caps), {}, fn(acc, k): set(acc, k, _show(caps[k])););
+
+# Returns a match as a dict with its location, source and captures, for JSON output.
+#
+# Returns: dict
+def describe(m, file):
+  {
+    "file": _name(file),
+    "start_line": _start(m, "start_line"),
+    "start_column": _start(m, "start_column"),
+    "end_line": _end(m, "end_line"),
+    "end_column": _end(m, "end_column"),
+    "text": _source_of(m),
+    "captures": _shown_caps(m["captures"])
+  };
+
+# -- Rewriting source --
+
+# Columns in node positions count bytes. Converts a byte offset in `line` to a character offset.
+def _b2c(line, b):
+  if (b <= 0):
+    0
+  elif (len(to_bytes(line)) == len(line)):
+    b
+  else:
+    _b2c_scan(line, b, 0);
+
+def _b2c_scan(line, b, k):
+  if (k >= len(line) || len(to_bytes(slice(line, 0, k))) >= b):
+    k
+  else:
+    _b2c_scan(line, b, k + 1);
+
+# Offset of the start of each line, in characters. Lines are counted in chunks so that the
+# array that is appended to stays small.
+def _chunk_starts(lines, pos):
+  fold(lines, {"pos": pos, "out": []}, fn(acc, l): {"pos": acc["pos"] + len(l) + 1, "out": acc["out"] + [acc["pos"]]};);
+
+def _starts_chunk(lines, acc, s):
+  let c = _chunk_starts(slice(lines, s, s + 1000), acc["pos"])
+  | {"pos": c["pos"], "out": acc["out"] + c["out"]};
+
+def _starts(src):
+  let lines = split(src, "\n")
+  | fold(range(0, len(lines) - 1, 1000), {"pos": 0, "out": []}, fn(acc, s): _starts_chunk(lines, acc, s);)["out"];
+
+def _index(src): {"lines": split(src, "\n"), "starts": _starts(src)};
+
+def _pos(ix, line, col): ix["starts"][line - 1] + _b2c(ix["lines"][line - 1], col - 1);
+
+# A list item node starts after its marker; this moves the start back to the marker.
+def _item_start(ix, n, loc):
+  if (to_md_name(n) == "list"):
+    _before_marker(slice(ix["lines"][loc["start_line"] - 1], 0, _b2c(ix["lines"][loc["start_line"] - 1], loc["start_column"] - 1)))
+  else:
+    _b2c(ix["lines"][loc["start_line"] - 1], loc["start_column"] - 1);
+
+def _before_marker(prefix): _marker_at(prefix, _regex_replace_matches(prefix, "(?:[-*+]|[0-9]+[.)])[ \t]+(?:\\[[ xX]\\][ \t]+)?$")["matches"]);
+
+def _marker_at(prefix, ms): if (is_empty(ms)): len(prefix) else: first(ms)["start"];
+
+def _edit(ix, m, text):
+  let n = first(m["nodes"])
+  | _edit_at(ix, m, text, _loc(n), _item_start(ix, n, _loc(n)));
+
+def _edit_at(ix, m, text, loc, col):
+  {"start": ix["starts"][loc["start_line"] - 1] + col, "end": _pos(ix, _end(m, "end_line"), _end(m, "end_column")), "text": text};
+
+def _edit_prev_end(edits, i): if (i == 0): 0 else: edits[i - 1]["end"];
+
+def _edit_piece(src, edits, i): slice(src, _edit_prev_end(edits, i), edits[i]["start"]) + edits[i]["text"];
+
+def _apply(src, edits):
+  join(map(range(0, len(edits) - 1), fn(i): _edit_piece(src, edits, i);), "") + slice(src, last(edits)["end"], len(src));
+
+def _rendered(ms, tmpl): map(ms, fn(m): _render(tmpl, m["captures"], _match_title(m)););
+
+def _edits(ix, ms, texts):
+  map(range(0, len(ms) - 1), fn(i): _edit(ix, ms[i], texts[i]););
+
+# Rewrites the source text of a document. Every match is replaced by `tmpl`
+# and the rest of `src` is kept byte for byte.
+#
+# Returns: string
+def rewrite_source(src, ms, tmpl):
+  if (is_empty(ms)): src else: _apply(src, _edits(_index(src), ms, _rendered(ms, tmpl)));
+
+# -- Command line --
+
+# Turns the two characters `\n` in a command line argument into a line break.
+#
+# Returns: string
+def unescape(s): regex_replace(s, "\\\\n", fn(m): "\n";);
+
+def _arg(k, v): if (is_string(v) && (k == "pattern" || k == "inside" || k == "not_inside")): unescape(v) else: v;
+
+def _base(a): if (is_none(a["rule"])): {} else: a["rule"];
+
+def _overlay(rule, a):
+  fold(["pattern", "kind", "lang", "inside", "not_inside", "constraints", "not_constraints"], rule, fn(acc, k): if (is_none(a[k])): acc else: set(acc, k, _arg(k, a[k])););
+
+def _need(rule): if (is_none(rule["pattern"])): error("pattern: `--args pattern` or a rule with `pattern` is required") else: rule;
+
+def _count_line(file, ms): if (is_empty(ms)): [] else: [_name(file) + ": " + to_string(len(ms))];
+
+def _emit(a, file, ms):
+  if (a["output"] == "json"):
+    map(ms, fn(m): describe(m, file);)
+  elif (a["output"] == "count"):
+    _count_line(file, ms)
+  else:
+    map(ms, fn(m): report(m, file););
+
+def _previews(file, ms, tmpl): _previews_of(file, ms, _rendered(ms, tmpl));
+
+def _previews_of(file, ms, texts):
+  map(range(0, len(ms) - 1), fn(i): preview(ms[i], file, texts[i]););
+
+def _described(file, ms, tmpl): _described_of(file, ms, _rendered(ms, tmpl));
+
+def _described_of(file, ms, texts):
+  map(range(0, len(ms) - 1), fn(i): set(describe(ms[i], file), "replacement", texts[i]););
+
+# Prints the document without its final line break, which the output adds back.
+def _doc(src): regex_replace(src, "\n$", fn(m): "";);
+
+def _write(file, ms, src): write_file(file, src) | [file + ": " + to_string(len(ms)) + " replaced"];
+
+def _updated(file, ms, new): if (is_empty(ms)): [] else: _write(file, ms, new);
+
+def _source_file(file): if (is_none(file) || file == ""): error("pattern: `doc` and `write` need a file argument") else: read_file(file);
+
+def _doc_or_update(a, file, ms, tmpl):
+  let new = rewrite_source(_source_file(file), ms, tmpl)
+  | if (a["write"] == "true" || a["write"] == true): _updated(file, ms, new) else: [_doc(new)];
+
+def _rewrite(a, file, ms, tmpl):
+  if (a["write"] == "true" || a["write"] == true || a["output"] == "doc"):
+    _doc_or_update(a, file, ms, tmpl)
+  elif (a["output"] == "json"):
+    _described(file, ms, tmpl)
+  elif (a["output"] == "count"):
+    _count_line(file, ms)
+  else:
+    _previews(file, ms, tmpl);
+
+def _dispatch(ns, a, file, rule):
+  if (is_none(a["rewrite"])):
+    _emit(a, file, find_rule(ns, rule))
+  else:
+    _rewrite(a, file, find_rule(ns, rule), trim(unescape(a["rewrite"])));
+
+# Entry point of the compiled program (see `cli.mq`). `a` holds the named arguments:
+# `pattern`, `kind`, `lang`, `inside`, `not_inside`, `constraints`, `not_constraints`,
+# `rule` (a whole rule dict) and `output` (`text`, `json` or `count`).
+# Without `rewrite` it prints the matches. With `rewrite` it previews the changes, or with
+# `output` set to `doc` prints the rewritten document, or with `write` writes the file.
+def run(ns, a, file): _dispatch(ns, a, file, _need(_overlay(_base(a), a)));

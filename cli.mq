@@ -1,0 +1,3 @@
+include "pattern"
+| nodes
+| run(self, ARGS["named"], try: __FILE__ catch: None)
