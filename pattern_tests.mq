@@ -161,7 +161,7 @@ end
 
 def test_report_table_cell_position_is_its_content():
   let ms = find_all(to_markdown("| a |\n|---|\n| [c](http://c) |\n"), "[$t]($u)")
-  | assert_eq(report(first(ms), "a.md"), "a.md:3:3\n> [c](http://c)\n  $t = c\n  $u = http://c")
+  | assert_eq(report(first(ms)), "3:3  [c](http://c)\n       $t = c\n       $u = http://c")
 end
 
 # -- structural matching --
@@ -413,15 +413,25 @@ end
 
 # -- reporting --
 
-def test_report_shows_location_source_and_captures():
+def test_report_shows_position_source_and_captures():
   let ns = to_markdown("# A\n\n[x](http://y)\n")
   | let ms = find_all(ns, "[$t](http://$r)")
-  | assert_eq(report(first(ms), "a.md"), "a.md:3:1\n> [x](http://y)\n  $t = x\n  $r = y")
+  | assert_eq(report(first(ms)), "3:1  [x](http://y)\n       $t = x\n       $r = y")
+end
+
+def test_report_aligns_the_lines_of_a_multi_line_match():
+  let ms = find_all(to_markdown("```sh\nls\n```\n"), "```$l\n$c\n```")
+  | assert_eq(report(first(ms)), "1:1  ```sh\n     ls\n     ```\n       $l = sh\n       $c = ls")
+end
+
+def test_group_names_the_file_once_and_separates_matches_with_a_blank_line():
+  assert_eq(group("a.md", ["1:1  x", "2:1  y"]), ["a.md\n1:1  x\n\n2:1  y"])
+  | assert_eq(group("a.md", []), [])
 end
 
 def test_preview_shows_old_and_new_text():
   let ms = find_all(to_markdown("[x](http://y)\n"), "[$t](http://$r)")
-  | assert_eq(preview(first(ms), "a.md", "[x](https://y)"), "a.md:1:1\n- [x](http://y)\n+ [x](https://y)")
+  | assert_eq(preview(first(ms), "[x](https://y)"), "1:1  - [x](http://y)\n     + [x](https://y)")
 end
 
 def test_describe_has_location_and_captures():
@@ -461,7 +471,7 @@ def _swap(s, from, to): regex_replace(s, from, fn(m): to;);
 
 def _without_final_break(s): regex_replace(s, "\n$", fn(m): "";);
 
-# @parametrize([["tiny", {"pattern": "[$t](http://$r)"}, ["tiny.md:1:1\n> [x](http://y)\n  $t = x\n  $r = y"]], ["sample", {"pattern": "[$t]($t)"}, ["sample.md:17:1\n> [same](same)\n  $t = same"]], ["sample", {"pattern": "[$t]($u \"$title\")"}, ["sample.md:5:13\n> [home](https://x.org \"Home page\")\n  $t = home\n  $u = https://x.org\n  $title = Home page"]], ["sample", {"pattern": "[$t]($u)", "inside": "## Install", "constraints": {"u": "^http:"}}, ["sample.md:5:50\n> [mirror](http://m.org)\n  $t = mirror\n  $u = http://m.org"]], ["tree", {"pattern": "[$t]($u)", "inside": "## Install"}, ["tree.md:5:7\n> [home](http://a.example)\n  $t = home\n  $u = http://a.example", "tree.md:7:8\n> [mirror](http://b.example)\n  $t = mirror\n  $u = http://b.example"]]])
+# @parametrize([["tiny", {"pattern": "[$t](http://$r)"}, ["tiny.md\n1:1  [x](http://y)\n       $t = x\n       $r = y"]], ["sample", {"pattern": "[$t]($t)"}, ["sample.md\n17:1  [same](same)\n        $t = same"]], ["sample", {"pattern": "[$t]($u \"$title\")"}, ["sample.md\n5:13  [home](https://x.org \"Home page\")\n        $t = home\n        $u = https://x.org\n        $title = Home page"]], ["sample", {"pattern": "[$t]($u)", "inside": "## Install", "constraints": {"u": "^http:"}}, ["sample.md\n5:50  [mirror](http://m.org)\n        $t = mirror\n        $u = http://m.org"]], ["tree", {"pattern": "[$t]($u)", "inside": "## Install"}, ["tree.md\n5:7  [home](http://a.example)\n       $t = home\n       $u = http://a.example\n\n7:8  [mirror](http://b.example)\n       $t = mirror\n       $u = http://b.example"]]])
 def test_run_report(name, args, expected):
   assert_eq(_run_on(name, args), expected)
 end
@@ -471,7 +481,7 @@ def test_run_count(name, args, expected):
   assert_eq(_run_on(name, args), expected)
 end
 
-# @parametrize([["tiny", {"pattern": "[$t](http://$r)", "rewrite": "[$t](https://$r)"}, ["tiny.md:1:1\n- [x](http://y)\n+ [x](https://y)"]], ["sample", {"pattern": "[$t](http://$r)", "rewrite": "[$t](https://$r)"}, ["sample.md:5:50\n- [mirror](http://m.org)\n+ [mirror](https://m.org)", "sample.md:24:8\n- [deep](http://deep.example)\n+ [deep](https://deep.example)"]]])
+# @parametrize([["tiny", {"pattern": "[$t](http://$r)", "rewrite": "[$t](https://$r)"}, ["tiny.md\n1:1  - [x](http://y)\n     + [x](https://y)"]], ["sample", {"pattern": "[$t](http://$r)", "rewrite": "[$t](https://$r)"}, ["sample.md\n5:50  - [mirror](http://m.org)\n      + [mirror](https://m.org)\n\n24:8  - [deep](http://deep.example)\n      + [deep](https://deep.example)"]]])
 def test_run_preview(name, args, expected):
   assert_eq(_run_on(name, args), expected)
 end

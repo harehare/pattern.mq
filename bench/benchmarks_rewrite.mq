@@ -31,7 +31,7 @@ def bench_join_nodes():
 end
 
 def bench_report():
-  map(_ms, fn(m): pattern::report(m, "a.md");)
+  map(_ms, fn(m): pattern::report(m);)
 end
 
 def bench_describe():

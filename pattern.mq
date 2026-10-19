@@ -633,21 +633,45 @@ def _show(v): if (is_array(v)): _text(v) else: v;
 
 def _name(file): if (is_none(file) || file == ""): "<stdin>" else: file;
 
-def _caps_lines(caps): map(keys(caps), fn(k): "  $" + k + " = " + _show(caps[k]););
+def _caps_lines(caps): map(keys(caps), fn(k): "$" + k + " = " + _show(caps[k]););
 
-def _prefixed(p, s): join(map(split(s, "\n"), fn(l): p + l;), "\n");
+def _label(m): to_string(_start(m, "start_line")) + ":" + to_string(_start(m, "start_column"));
 
-def _where(m, file): _name(file) + ":" + to_string(_start(m, "start_line")) + ":" + to_string(_start(m, "start_column"));
+def _pad_to(s, w): s + _rep(" ", w - len(s));
 
-# Returns a printable report of a match: its location, source and captures.
+# Width of the widest position among the matches, so that their sources line up.
+def _label_width(ms): fold(ms, 0, fn(w, m): max(w, len(_label(m))););
+
+# Puts `head` before the first line of `s` and as many spaces before the others.
+def _hang(head, s): _hang_lines(_rep(" ", len(head)), head, split(s, "\n"));
+
+def _hang_lines(pad, head, ls): join(map(range(0, len(ls) - 1), fn(i): (if (i == 0): head else: pad) + ls[i];), "\n");
+
+def _indented(pad, ls): map(ls, fn(l): pad + l;);
+
+def _report_at(m, w):
+  let head = _pad_to(_label(m), w) + "  "
+  | join([_hang(head, _source_of(m))] + _indented(_rep(" ", len(head) + 2), _caps_lines(m["captures"])), "\n");
+
+def _preview_at(m, w, text):
+  let head = _pad_to(_label(m), w) + "  "
+  | join([_hang(head + "- ", _source_of(m)), _hang(_rep(" ", len(head)) + "+ ", text)], "\n");
+
+# Returns a printable report of a match: its position, source and captures.
 #
 # Returns: string
-def report(m, file): join([_where(m, file), _prefixed("> ", _source_of(m))] + _caps_lines(m["captures"]), "\n");
+def report(m): _report_at(m, len(_label(m)));
 
-# Returns a printable preview of a rewrite: its location and the old and new text.
+# Returns a printable preview of a rewrite: its position and the old and new text.
 #
 # Returns: string
-def preview(m, file, text): join([_where(m, file), _prefixed("- ", _source_of(m)), _prefixed("+ ", text)], "\n");
+def preview(m, text): _preview_at(m, len(_label(m)), text);
+
+# Returns the output of a file: its name, then its matches separated by blank lines.
+#
+# Returns: array
+def group(file, blocks):
+  if (is_empty(blocks)): [] else: [_name(file) + "\n" + join(blocks, "\n\n")];
 
 def _shown_caps(caps): fold(keys(caps), {}, fn(acc, k): set(acc, k, _show(caps[k])););
 
@@ -667,21 +691,6 @@ def describe(m, file):
 
 # -- Rewriting source --
 
-# Columns in node positions count bytes. Converts a byte offset in `line` to a character offset.
-def _b2c(line, b):
-  if (b <= 0):
-    0
-  elif (len(to_bytes(line)) == len(line)):
-    b
-  else:
-    _b2c_scan(line, b, 0);
-
-def _b2c_scan(line, b, k):
-  if (k >= len(line) || len(to_bytes(slice(line, 0, k))) >= b):
-    k
-  else:
-    _b2c_scan(line, b, k + 1);
-
 # Offset of the start of each line, in characters. Lines are counted in chunks so that the
 # array that is appended to stays small.
 def _chunk_starts(lines, pos):
@@ -697,14 +706,14 @@ def _starts(src):
 
 def _index(src): {"lines": split(src, "\n"), "starts": _starts(src)};
 
-def _pos(ix, line, col): ix["starts"][line - 1] + _b2c(ix["lines"][line - 1], col - 1);
+def _pos(ix, line, col): ix["starts"][line - 1] + col - 1;
 
 # A list item node starts after its marker; this moves the start back to the marker.
 def _item_start(ix, n, loc):
   if (to_md_name(n) == "list"):
-    _before_marker(slice(ix["lines"][loc["start_line"] - 1], 0, _b2c(ix["lines"][loc["start_line"] - 1], loc["start_column"] - 1)))
+    _before_marker(slice(ix["lines"][loc["start_line"] - 1], 0, loc["start_column"] - 1))
   else:
-    _b2c(ix["lines"][loc["start_line"] - 1], loc["start_column"] - 1);
+    loc["start_column"] - 1;
 
 def _before_marker(prefix): _marker_at(prefix, _regex_replace_matches(prefix, "(?:[-*+]|[0-9]+[.)])[ \t]+(?:\\[[ xX]\\][ \t]+)?$")["matches"]);
 
@@ -750,7 +759,7 @@ def _base(a): if (is_none(a["rule"])): {} else: a["rule"];
 def _overlay(rule, a):
   fold(["pattern", "kind", "lang", "inside", "not_inside", "constraints", "not_constraints"], rule, fn(acc, k): if (is_none(a[k])): acc else: set(acc, k, _arg(k, a[k])););
 
-def _need(rule): if (is_none(rule["pattern"])): error("pattern: `--args pattern` or a rule with `pattern` is required") else: rule;
+def _need(rule): if (is_none(rule["pattern"])): error("pattern: `--arg pattern` or a rule with `pattern` is required") else: rule;
 
 def _count_line(file, ms): if (is_empty(ms)): [] else: [_name(file) + ": " + to_string(len(ms))];
 
@@ -760,12 +769,12 @@ def _emit(a, file, ms):
   elif (a["output"] == "count"):
     _count_line(file, ms)
   else:
-    map(ms, fn(m): report(m, file););
+    group(file, map(ms, fn(m): _report_at(m, _label_width(ms));));
 
 def _previews(file, ms, tmpl): _previews_of(file, ms, _rendered(ms, tmpl));
 
 def _previews_of(file, ms, texts):
-  map(range(0, len(ms) - 1), fn(i): preview(ms[i], file, texts[i]););
+  group(file, map(range(0, len(ms) - 1), fn(i): _preview_at(ms[i], _label_width(ms), texts[i]);));
 
 def _described(file, ms, tmpl): _described_of(file, ms, _rendered(ms, tmpl));
 

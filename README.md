@@ -10,6 +10,8 @@ Inspired by [ast-grep](https://ast-grep.github.io/): write the shape you are loo
 
 Compile the command once. The `.mqc` format is tied to the mq version, so recompile after upgrading mq.
 
+This needs a recent mq: named arguments are passed with `--arg NAME VALUE` (earlier builds took `--args NAME VALUE`), and node columns count characters, not bytes.
+
 ```sh
 mq compile -L . -f cli.mq -o pattern.mqc
 ```
@@ -17,22 +19,28 @@ mq compile -L . -f cli.mq -o pattern.mqc
 Search:
 
 ```sh
-mq pattern.mqc --args pattern '[$text]($url)' docs/*.md
+mq pattern.mqc --arg pattern '[$text]($url)' docs/*.md
 ```
 
 ```
-docs/a.md:12:5
-> [docs](http://example.com)
-  $text = docs
-  $url = http://example.com
+docs/a.md
+12:5  [docs](http://example.com)
+        $text = docs
+        $url = http://example.com
+
+30:1  [api](https://example.com/api "API")
+        $text = api
+        $url = https://example.com/api
 ```
 
-Preview a rewrite, then apply it:
+Each file with a match is named once, followed by `line:column`, the matched source and its captures. Matches are separated by a blank line.
+
+Preview a rewrite, then apply it. The preview shows `-` for the old text and `+` for the new:
 
 ```sh
 P='[$text](http://$rest)'; R='[$text](https://$rest)'
-mq pattern.mqc --args pattern "$P" --args rewrite "$R" docs/*.md                    # preview
-mq -R -W pattern.mqc --args pattern "$P" --args rewrite "$R" --args write true docs/*.md   # write files
+mq pattern.mqc --arg pattern "$P" --arg rewrite "$R" docs/*.md                    # preview
+mq -R -W pattern.mqc --arg pattern "$P" --arg rewrite "$R" --arg write true docs/*.md   # write files
 ```
 
 `-R` and `-W` grant `read_file` and `write_file`, which only `output doc` and `write` use. Only the matched text is replaced; the rest of the file is kept byte for byte.
@@ -41,23 +49,23 @@ mq -R -W pattern.mqc --args pattern "$P" --args rewrite "$R" --args write true d
 
 | Argument | Description |
 |---|---|
-| `--args pattern P` | Pattern to search for (required unless `--argjson rule` has one) |
-| `--args rewrite T` | Template to replace each match with. Without it, matches are printed |
-| `--args kind K` | Type of the first matched node: `link`, `image`, `code`, `list`, `h2`, ... |
-| `--args lang L` | Language of the first matched node when it is a code block |
-| `--args inside H` | Match only under a heading that matches pattern `H`. Its metavariables join the captures |
-| `--args not_inside H` | Match only outside headings that match `H` |
+| `--arg pattern P` | Pattern to search for (required unless `--argjson rule` has one) |
+| `--arg rewrite T` | Template to replace each match with. Without it, matches are printed |
+| `--arg kind K` | Type of the first matched node: `link`, `image`, `code`, `list`, `h2`, ... |
+| `--arg lang L` | Language of the first matched node when it is a code block |
+| `--arg inside H` | Match only under a heading that matches pattern `H`. Its metavariables join the captures |
+| `--arg not_inside H` | Match only outside headings that match `H` |
 | `--argjson constraints '{"u":"^https"}'` | Regex each captured variable must match |
 | `--argjson not_constraints '{...}'` | Regex each captured variable must not match |
 | `--argjson rule '{...}'` | All of the above as one dict (`pattern`, `kind`, `lang`, `inside`, ...). Other arguments override it |
-| `--args output text\|json\|count\|doc` | Output format. Default `text` (`doc` needs `rewrite`). Add `-F json` for valid JSON |
-| `--args write true` | Write the rewritten files in place (needs `rewrite`, `-R` and `-W`) |
+| `--arg output text\|json\|count\|doc` | Output format. Default `text` (`doc` needs `rewrite`). Add `-F json` for valid JSON |
+| `--arg write true` | Write the rewritten files in place (needs `rewrite`, `-R` and `-W`) |
 
 Quoting:
 
 - Use single quotes so the shell leaves `$` alone.
 - Write `\n` for a line break. A blank line (`\n\n`) separates blocks in a multi-node pattern.
-- A value starting with `-` is taken as an option by mq. Put a space in front of it: `--args pattern ' - [ ] $item'`. Spaces around patterns and templates are ignored.
+- A value starting with `-` is taken as an option by mq. Put a space in front of it: `--arg pattern ' - [ ] $item'`. Spaces around patterns and templates are ignored.
 - Without a file argument the command reads stdin and reports `<stdin>`. `output doc` and `write` need a file.
 
 ## Patterns
@@ -92,50 +100,50 @@ Quoting:
 Replace `http://` links with `https://`:
 
 ```sh
-mq pattern.mqc --args pattern '[$t](http://$r)' --args rewrite '[$t](https://$r)' README.md
+mq pattern.mqc --arg pattern '[$t](http://$r)' --arg rewrite '[$t](https://$r)' README.md
 ```
 
 Check off every unchecked task:
 
 ```sh
-mq -R -W pattern.mqc --args pattern ' - [ ] $item' --args rewrite ' - [x] $item' --args write true TODO.md
+mq -R -W pattern.mqc --arg pattern ' - [ ] $item' --arg rewrite ' - [x] $item' --arg write true TODO.md
 ```
 
 Find a heading and the link right after it:
 
 ```sh
-mq pattern.mqc --args pattern '# $head\n\n[$text](http://$rest)' doc.md
+mq pattern.mqc --arg pattern '# $head\n\n[$text](http://$rest)' doc.md
 ```
 
 Find links anywhere in a section, with the heading in the result:
 
 ```sh
-mq pattern.mqc --args pattern '# $head\n\n$$$\n\n[$text](http://$rest)' doc.md
+mq pattern.mqc --arg pattern '# $head\n\n$$$\n\n[$text](http://$rest)' doc.md
 ```
 
 Insecure links in the Install section only:
 
 ```sh
-mq pattern.mqc --args pattern '[$t](http://$r)' --args inside '## Install' doc.md
+mq pattern.mqc --arg pattern '[$t](http://$r)' --arg inside '## Install' doc.md
 ```
 
 Rust code blocks that contain `unwrap`:
 
 ```sh
-mq pattern.mqc --args pattern '```$l\n$code\n```' --args lang rust \
+mq pattern.mqc --arg pattern '```$l\n$code\n```' --arg lang rust \
   --argjson constraints '{"code":"unwrap"}' docs/*.md
 ```
 
 Count matches per file:
 
 ```sh
-mq pattern.mqc --args pattern '[$t]($u)' --args output count docs/*.md
+mq pattern.mqc --arg pattern '[$t]($u)' --arg output count docs/*.md
 ```
 
 Rename a section and keep its body:
 
 ```sh
-mq pattern.mqc --args pattern '## Install\n\n$$$body' --args rewrite '## Setup\n\n$$$body' README.md
+mq pattern.mqc --arg pattern '## Install\n\n$$$body' --arg rewrite '## Setup\n\n$$$body' README.md
 ```
 
 ## Using it as a module
@@ -159,7 +167,7 @@ import "pattern"
 | `replace_rule(ns, rule, tmpl)` | `replace_all` for a rule |
 | `rewrite_source(src, ms, tmpl)` | Replaces matches `ms` in the source text `src` and keeps the rest of it |
 | `join_nodes(ns)` | Joins nodes back into Markdown using their positions |
-| `report(m, file)`, `preview(m, file, text)`, `describe(m, file)` | Text and dict forms used by the command |
+| `report(m)`, `preview(m, text)`, `group(file, blocks)`, `describe(m, file)` | Text and dict forms used by the command: a match, a rewrite preview, the output of one file, and a match as a dict |
 
 `mq -U` needs as many output nodes as input nodes. `replace` fits it for one-to-one rewrites (`mq -U '.link | pattern::replace(...)'`);
 `replace_all` and `replace_rule` return a different number of nodes when a template has more or fewer nodes than the match, so use `rewrite_source` or the command for those.
