@@ -10,7 +10,7 @@ Inspired by [ast-grep](https://ast-grep.github.io/): write the shape you are loo
 
 Compile the command once. The `.mqc` format is tied to the mq version, so recompile after upgrading mq.
 
-This needs a recent mq: named arguments are passed with `--arg NAME VALUE` (earlier builds took `--args NAME VALUE`), and node columns count characters, not bytes.
+This needs mq v0.10.0 or later: named arguments are passed with `--arg NAME VALUE` (earlier builds took `--args NAME VALUE`), and node columns count characters, not bytes.
 
 ```sh
 mq compile -L . -f cli.mq -o pattern.mqc
@@ -215,7 +215,7 @@ mq-bench bench/benchmarks.mq --baseline before.json
 
 ## Compatibility
 
-Requires [mq](https://github.com/harehare/mq) v0.9 or later.
+Requires [mq](https://github.com/harehare/mq) v0.10.0 or later.
 
 ## License
 
