@@ -18,7 +18,6 @@ jobs:
           persist-credentials: false
       - uses: harehare/setup-mq@cfe56378737401938b84d329d42f63cafa263a71 # v1.1.6
         with:
-          version: ">=0.10.0"
           bins: test
       - name: Run tests
         run: mq-test pattern_tests.mq
